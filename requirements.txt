@@ -1,10 +1,10 @@
 # 运行时依赖（版本按当前 .venv 实际安装锁定）
 # 安装：pip install -r requirements.txt
-# 测试需要额外安装：pip install pytest
+# 测试需要额外安装：pip install pytest ruff
 
 # --- 深度学习 ---
 torch==2.14.0
-torchvision==0.29.0          # 感知损失需要 vgg19 预训练权重
+torchvision==0.29.0          # 感知损失（VGG19）与 LPIPS（AlexNet）都依赖它
 
 # --- 图像处理 ---
 opencv-python==5.0.0.93
@@ -21,3 +21,9 @@ flask-cors==6.0.5
 
 # --- 其他 ---
 tqdm==4.70.1
+
+# --- 可选：感知指标（evaluate.py 的 LPIPS 列） ---
+# LPIPS 只用于评估，且首次运行会下载约 233MB 的 AlexNet 权重，
+# 因此不放进默认依赖。需要时手动安装（--no-deps 避免 pip 重装 torch）：
+#   pip install --no-deps lpips==0.1.4
+# 未安装时 evaluate.py 会明确报错提示，其余功能不受影响。
