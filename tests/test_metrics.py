@@ -3,6 +3,8 @@
 
 SSIM 的向量化实现（cv2.filter2D）必须与朴素滑窗定义逐点等价，
 否则算出来的分数没有意义。这里用暴力实现做交叉验证。
+
+LPIPS 部分依赖 lpips 包（可选），未安装时相关用例自动跳过。
 """
 import os
 import sys
@@ -17,13 +19,16 @@ if ROOT not in sys.path:
 from evaluate import (  # noqa: E402
     _gaussian_kernel,
     aggregate_psnr,
+    calc_lpips,
     calc_mse,
     calc_psnr,
     calc_ssim,
     calc_ssim_multi,
+    get_lpips,
     mean_psnr,
     mse_to_psnr,
     shave,
+    to_lpips_tensor,
     to_uint8,
     to_y_channel,
 )
@@ -285,3 +290,62 @@ def test_to_y_channel_matches_cv2():
     y = to_y_channel(rgb)
     expected = cv2.cvtColor(rgb, cv2.COLOR_RGB2YCrCb)[:, :, 0]
     assert np.array_equal(y, expected)
+
+
+# ---------------- LPIPS（感知指标，可选依赖） ----------------
+
+@pytest.fixture(scope="module")
+def lpips_fn():
+    pytest.importorskip("lpips")
+    return get_lpips()
+
+
+def test_to_lpips_tensor_range_and_shape():
+    """LPIPS 要求输入归一化到 [-1,1]、NCHW"""
+    img = np.zeros((8, 8, 3), dtype=np.uint8)
+    t = to_lpips_tensor(img)
+    assert t.shape == (1, 3, 8, 8)
+    # 0 -> -1
+    assert np.allclose(t.numpy(), -1.0)
+
+    img2 = np.full((8, 8, 3), 255, dtype=np.uint8)
+    t2 = to_lpips_tensor(img2)
+    # 255 -> +1
+    assert np.allclose(t2.numpy(), 1.0)
+
+
+def test_lpips_identical_images_is_zero(lpips_fn):
+    """标定检查：同一张图的 LPIPS 必须为 0"""
+    rng = np.random.default_rng(21)
+    img = rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
+    assert calc_lpips(img, img, lpips_fn) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_lpips_nonnegative(lpips_fn):
+    rng = np.random.default_rng(22)
+    a = rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
+    b = rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
+    assert calc_lpips(a, b, lpips_fn) >= 0.0
+
+
+def test_lpips_increases_with_distortion(lpips_fn):
+    """扰动越大，LPIPS 应越大（单调性）"""
+    rng = np.random.default_rng(23)
+    base = rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
+
+    def with_noise(sigma):
+        noise = rng.normal(0, sigma, base.shape)
+        return np.clip(base.astype(np.float64) + noise, 0, 255).astype(np.uint8)
+
+    d_small = calc_lpips(with_noise(3), base, lpips_fn)
+    d_large = calc_lpips(with_noise(30), base, lpips_fn)
+    assert d_large > d_small
+
+
+def test_lpips_returns_plain_float(lpips_fn):
+    """返回值必须是 Python float（内部已 detach，不能再带梯度）"""
+    rng = np.random.default_rng(24)
+    a = rng.integers(0, 256, (32, 32, 3), dtype=np.uint8)
+    b = rng.integers(0, 256, (32, 32, 3), dtype=np.uint8)
+    v = calc_lpips(a, b, lpips_fn)
+    assert isinstance(v, float)

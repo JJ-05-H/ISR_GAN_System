@@ -51,6 +51,51 @@ WEIGHT_PATHS = {
 }
 
 
+# ---------------- LPIPS（感知指标） ----------------
+
+_LPIPS_FN = None
+
+
+def get_lpips():
+    """懒加载 LPIPS（AlexNet 骨干）。
+
+    为什么必须测感知指标：
+        PSNR/SSIM 是保真度指标，而对抗训练的卖点正是「牺牲保真度换感知质量」。
+        只用 PSNR 评价 GAN 会系统性地低估它——这是超分领域的经典权衡。
+        LPIPS 越低越接近人眼感知，是判断 GAN 是否真正起作用的关键补充。
+    首次调用会下载 AlexNet 预训练权重（约 233MB）并缓存。
+    """
+    global _LPIPS_FN
+    if _LPIPS_FN is None:
+        try:
+            import lpips
+        except ImportError as e:  # pragma: no cover
+            raise RuntimeError(
+                "未安装 lpips，无法计算感知指标。请执行：\n"
+                "  pip install --no-deps lpips\n"
+                "（--no-deps 避免 pip 重装 torch）"
+            ) from e
+        _LPIPS_FN = lpips.LPIPS(net="alex", verbose=False)
+        _LPIPS_FN.eval()
+    return _LPIPS_FN
+
+
+def to_lpips_tensor(img_rgb_uint8: np.ndarray):
+    """uint8 RGB → LPIPS 需要的 [-1,1] NCHW tensor"""
+    x = img_rgb_uint8.astype(np.float32) / 255.0 * 2.0 - 1.0
+    return torch.from_numpy(x).permute(2, 0, 1).unsqueeze(0)
+
+
+def calc_lpips(sr_rgb_uint8: np.ndarray, hr_rgb_uint8: np.ndarray, fn) -> float:
+    """LPIPS 距离（越低越接近人眼感知上的相似）。
+
+    注意 detach()：lpips 的返回值带梯度，不 detach 会在累加时告警并占用显存。
+    """
+    with torch.no_grad():
+        d = fn(to_lpips_tensor(sr_rgb_uint8), to_lpips_tensor(hr_rgb_uint8))
+    return float(d.detach().mean())
+
+
 # ---------------- 指标实现 ----------------
 
 def to_uint8(img_float01: np.ndarray) -> np.ndarray:
@@ -226,7 +271,8 @@ def tensor_to_rgb_uint8(out_tensor) -> np.ndarray:
 # ---------------- 主流程 ----------------
 
 def evaluate(data_root: str, split: str, targets: list[str], limit: int | None,
-             shave_border: int, device, out_dir: str, save_images: int = 0):
+             shave_border: int, device, out_dir: str, save_images: int = 0,
+             use_lpips: bool = True):
     index_path = Path(data_root) / f"{split}_index.json"
     if not index_path.exists():
         raise FileNotFoundError(
@@ -238,6 +284,12 @@ def evaluate(data_root: str, split: str, targets: list[str], limit: int | None,
     if limit:
         pairs = pairs[:limit]
     print(f"[{split}] 待评估图像对: {len(pairs)}")
+
+    lpips_fn = None
+    if use_lpips:
+        print("  加载 LPIPS (alex)...")
+        lpips_fn = get_lpips()
+        print("  已加载 LPIPS")
 
     # 载入模型（只加载实际要用的）
     models = {}
@@ -251,7 +303,8 @@ def evaluate(data_root: str, split: str, targets: list[str], limit: int | None,
     kernel = _gaussian_kernel()
     # 存 MSE 而不是 PSNR：纯色图块会得到 MSE=0，若存 PSNR 就是 inf，
     # 对 inf 取平均会污染结果。最后用 aggregate_psnr 从平均 MSE 换算。
-    accum = {t: {"mse_rgb": [], "ssim_rgb": [], "mse_y": [], "ssim_y": []}
+    accum = {t: {"mse_rgb": [], "ssim_rgb": [], "mse_y": [], "ssim_y": [],
+                 "lpips": []}
              for t in targets}
 
     out_dir_path = Path(out_dir)
@@ -289,6 +342,8 @@ def evaluate(data_root: str, split: str, targets: list[str], limit: int | None,
                     calc_mse(to_y_channel(sr_eval), to_y_channel(hr_eval)))
                 accum[t]["ssim_y"].append(
                     calc_ssim(to_y_channel(sr_eval), to_y_channel(hr_eval), kernel))
+                if lpips_fn is not None:
+                    accum[t]["lpips"].append(calc_lpips(sr_eval, hr_eval, lpips_fn))
 
                 # 可选：保存前若干张对比图
                 if save_images and i <= save_images and t == targets[-1]:
@@ -324,47 +379,62 @@ def evaluate(data_root: str, split: str, targets: list[str], limit: int | None,
                 p for p in (mse_to_psnr(m) for m in a["mse_rgb"])
                 if np.isfinite(p)] or [0.0])),
             "perfect_pairs": int(sum(1 for m in a["mse_rgb"] if m == 0)),
+            # 感知指标：越低越好（与 PSNR/SSIM 方向相反）
+            "lpips": float(np.mean(a["lpips"])) if a["lpips"] else None,
         }
 
     return results
 
 
 def print_table(results: dict, split: str, shave_border: int):
+    has_lpips = any(r.get("lpips") is not None for r in results.values())
     print()
-    print("=" * 78)
-    print(f"评估结果  split={split}  shave={shave_border}px  "
-          f"（PSNR 单位 dB，越高越好）")
-    print("口径 A「单张均值」：先算每对图的 PSNR 再平均 —— SR 论文惯例，与 README 原表一致")
+    print("=" * 86)
+    print(f"评估结果  split={split}  shave={shave_border}px")
+    print("PSNR/SSIM 越高越好；LPIPS 越低越好（感知指标，与 PSNR 方向相反）")
+    print("口径 A「单张均值」：先算每对图的 PSNR 再平均 —— SR 论文惯例")
     print("口径 B「池化」    ：先对全测试集求平均 MSE 再换算 —— 对高误差样本更敏感")
-    print("两者差距大说明误差在高误差图块上集中，属于预期现象")
-    print("=" * 78)
+    print("=" * 86)
     header = (f"{'方法':<11}{'PSNR(RGB)A':>11}{'PSNR(RGB)B':>11}"
-              f"{'SSIM(RGB)':>11}{'PSNR(Y)A':>10}{'SSIM(Y)':>9}{'n':>7}")
+              f"{'SSIM(RGB)':>11}{'PSNR(Y)A':>10}{'SSIM(Y)':>9}"
+              + (f"{'LPIPS':>9}" if has_lpips else "") + f"{'n':>7}")
     print(header)
-    print("-" * 78)
+    print("-" * 86)
     order = ["bicubic", "pretrain", "gan", "gan_final"]
     for t in [x for x in order if x in results] + \
              [x for x in results if x not in order]:
         r = results[t]
-        print(f"{t:<11}{r['psnr_rgb']:>11.3f}{r.get('psnr_rgb_pooled', float('nan')):>11.3f}"
-              f"{r['ssim_rgb']:>11.4f}{r['psnr_y']:>10.3f}{r['ssim_y']:>9.4f}{r['n']:>7}")
-    print("-" * 78)
+        row = (f"{t:<11}{r['psnr_rgb']:>11.3f}"
+               f"{r.get('psnr_rgb_pooled', float('nan')):>11.3f}"
+               f"{r['ssim_rgb']:>11.4f}{r['psnr_y']:>10.3f}{r['ssim_y']:>9.4f}")
+        if has_lpips:
+            lp = r.get("lpips")
+            row += f"{lp:>9.4f}" if lp is not None else f"{'-':>9}"
+        print(row + f"{r['n']:>7}")
+    print("-" * 86)
 
     # 相对双三次基线的增益
     if "bicubic" in results:
         base = results["bicubic"]
-        print("相对双三次基线的增益（按口径 A）：")
+        print("相对双三次基线的增益：")
+        base_lp = base.get("lpips")
         for t in results:
             if t == "bicubic":
                 continue
             dp = results[t]["psnr_rgb"] - base["psnr_rgb"]
             ds = results[t]["ssim_rgb"] - base["ssim_rgb"]
-            sign = "+" if dp >= 0 else ""
-            print(f"  {t:<10} PSNR {sign}{dp:.3f} dB   SSIM {ds:+.4f}")
+            line = f"  {t:<10} PSNR {dp:+.3f} dB   SSIM {ds:+.4f}"
+            lp = results[t].get("lpips")
+            if base_lp is not None and lp is not None:
+                line += f"   LPIPS {lp - base_lp:+.4f}（负值为更好）"
+            print(line)
     perfect = {t: results[t].get("perfect_pairs", 0) for t in results}
     if any(perfect.values()):
         print(f"注：完全一致的图块数（MSE=0，已从口径 A 中剔除）: {perfect}")
-    print("=" * 78)
+    if has_lpips:
+        print("解读提示：若某方法 PSNR 偏低但 LPIPS 也更低，说明它走的是")
+        print("          「牺牲保真度换感知质量」路线——这正是对抗训练的预期收益。")
+    print("=" * 86)
 
 
 def save_results(results: dict, split: str, out_dir: str, shave_border: int) -> Path:
@@ -386,13 +456,15 @@ def save_results(results: dict, split: str, out_dir: str, shave_border: int) -> 
     with csv_path.open("w", newline="", encoding="utf-8-sig") as fp:
         w = csv.writer(fp)
         w.writerow(["method", "psnr_rgb_mean", "psnr_rgb_pooled", "ssim_rgb",
-                    "psnr_y_mean", "psnr_y_pooled", "ssim_y",
+                    "psnr_y_mean", "psnr_y_pooled", "ssim_y", "lpips",
                     "psnr_rgb_std", "perfect_pairs", "n"])
         for t, r in results.items():
+            lp = r.get("lpips")
             w.writerow([t, f"{r['psnr_rgb']:.4f}", f"{r.get('psnr_rgb_pooled', float('nan')):.4f}",
                         f"{r['ssim_rgb']:.6f}",
                         f"{r['psnr_y']:.4f}", f"{r.get('psnr_y_pooled', float('nan')):.4f}",
                         f"{r['ssim_y']:.6f}",
+                        f"{lp:.6f}" if lp is not None else "",
                         f"{r['psnr_rgb_std']:.4f}", r.get("perfect_pairs", 0),
                         r["n"]])
 
@@ -401,7 +473,8 @@ def save_results(results: dict, split: str, out_dir: str, shave_border: int) -> 
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="ISR-GAN 量化评估（PSNR / SSIM）")
+    p = argparse.ArgumentParser(
+        description="ISR-GAN 量化评估（PSNR / SSIM / LPIPS）")
     p.add_argument("--data-root", default="processed",
                    help="processed 目录（含 *_index.json），默认 processed")
     p.add_argument("--split", default="test", choices=["train", "val", "test"],
@@ -416,6 +489,9 @@ def parse_args(argv=None):
     p.add_argument("--out-dir", default="results", help="结果输出目录")
     p.add_argument("--save-images", type=int, default=0,
                    help="保存前 N 张 HR/LR/SR 对比图")
+    p.add_argument("--no-lpips", action="store_true",
+                   help="跳过 LPIPS 感知指标（默认计算；它只做一次 AlexNet 前向，"
+                        "约 25ms/对，是判断 GAN 是否真正起作用的关键指标）")
     p.add_argument("--cpu", action="store_true", help="强制使用 CPU")
     return p.parse_args(argv)
 
@@ -434,6 +510,7 @@ def main(argv=None):
         device=device,
         out_dir=args.out_dir,
         save_images=args.save_images,
+        use_lpips=not args.no_lpips,
     )
     if not results:
         print("没有可用的评估结果。")

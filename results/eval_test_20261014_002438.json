@@ -1,7 +1,7 @@
 {
   "split": "test",
   "shave_border": 4,
-  "timestamp": "20261013_225406",
+  "timestamp": "20261014_002438",
   "results": {
     "bicubic": {
       "n": 11634,
@@ -12,7 +12,8 @@
       "psnr_y_pooled": 23.60337929726667,
       "ssim_y": 0.7487922009539575,
       "psnr_rgb_std": 8.530704752103507,
-      "perfect_pairs": 20
+      "perfect_pairs": 20,
+      "lpips": 0.39998930340089855
     },
     "pretrain": {
       "n": 11634,
@@ -23,7 +24,8 @@
       "psnr_y_pooled": 24.739769333435426,
       "ssim_y": 0.7754111822779267,
       "psnr_rgb_std": 7.6310647098228666,
-      "perfect_pairs": 0
+      "perfect_pairs": 0,
+      "lpips": 0.2542227350372768
     },
     "gan": {
       "n": 11634,
@@ -34,7 +36,8 @@
       "psnr_y_pooled": 23.695679860160052,
       "ssim_y": 0.7111770311375963,
       "psnr_rgb_std": 6.509131723687203,
-      "perfect_pairs": 0
+      "perfect_pairs": 0,
+      "lpips": 0.22533114595059
     }
   }
 }

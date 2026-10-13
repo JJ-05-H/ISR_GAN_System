@@ -1,4 +1,0 @@
-﻿method,psnr_rgb_mean,psnr_rgb_pooled,ssim_rgb,psnr_y_mean,psnr_y_pooled,ssim_y,psnr_rgb_std,perfect_pairs,n
-bicubic,28.5806,23.5327,0.745822,28.8788,23.6034,0.748792,8.5307,20,11634
-pretrain,29.3113,24.6268,0.770235,29.7348,24.7398,0.775411,7.6311,0,11634
-gan,27.2569,23.4840,0.698123,28.0645,23.6957,0.711177,6.5091,0,11634
