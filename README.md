@@ -12,8 +12,8 @@
 [![OpenCV](https://img.shields.io/badge/OpenCV-4.x-5C3EE8?style=flat-square&logo=opencv&logoColor=white)](https://opencv.org/)
 [![License](https://img.shields.io/badge/License-MIT-22c55e?style=flat-square)](#-license)
 
-![PSNR](https://img.shields.io/badge/PSNR-29.85_dB-6d5dfc?style=flat-square)
-![SSIM](https://img.shields.io/badge/SSIM-0.876-6d5dfc?style=flat-square)
+![PSNR](https://img.shields.io/badge/PSNR-29.31_dB_(test)-6d5dfc?style=flat-square)
+![SSIM](https://img.shields.io/badge/SSIM-0.7702_(test)-6d5dfc?style=flat-square)
 ![Scale](https://img.shields.io/badge/Upscale-4%C3%97-f59e0b?style=flat-square)
 
 </div>
@@ -68,21 +68,27 @@
 
 ### 2️⃣ 判别器网络：条件判别器
 
-采用 4 通道输入（RGB + 语义掩码）的条件判别器，通过 5 层卷积逐级下采样，最后经全局平均池化与全连接层输出真伪概率。
+采用 4 通道输入（RGB + 语义掩码），通过 5 层卷积逐级下采样，最后经全局平均池化与全连接层输出**真伪 logit**（配合 `BCEWithLogitsLoss`，不做 sigmoid）。
+
+> ⚠️ **当前实现状态**：语义掩码尚未真正接入。训练脚本中传入的是**全 1 掩码**（`src/train/train_gan.py`），即第 4 通道为常量，因此判别器目前**退化为普通（无条件）判别器**。条件分支的输入接口已预留，但要真正生效需要引入语义分割图作为条件。
 
 ### 3️⃣ 复合损失函数
 
-总损失由三部分加权构成：
+论文中总损失由三部分加权构成：
 
 $$
 \mathcal{L}_{\text{total}} = \lambda_{\text{mse}} \cdot \mathcal{L}_{\text{MSE}} + \lambda_{\text{adv}} \cdot \mathcal{L}_{\text{Adv}} + \lambda_{\text{percep}} \cdot \mathcal{L}_{\text{Percep}}
 $$
 
-| 损失项 | 作用 | 权重 |
-|---|---|---|
-| 🎯 MSE 损失 | 监督像素级一致性，保证基础保真度 | `λ_mse = 1.0` |
-| ⚔️ 对抗损失 | 采用非饱和损失，驱动生成器生成真实高频纹理 | `λ_adv = 1e-3` |
-| 👁️ 感知损失 | 基于预训练 VGG19 特征图欧氏距离，约束全局语义 | `λ_percep = 1e-2` |
+| 损失项 | 作用 | 权重 | 当前是否启用 |
+|---|---|---|---|
+| 🎯 MSE 损失 | 监督像素级一致性，保证基础保真度 | `λ_mse = 1.0` | ✅ 已启用 |
+| ⚔️ 对抗损失 | 非饱和对抗损失，驱动生成器生成真实高频纹理 | `λ_adv = 1e-3` | ✅ 已启用 |
+| 👁️ 感知损失 | 基于预训练 VGG19 特征图欧氏距离，约束全局语义 | `λ_percep = 1e-2` | ❌ **未接入** |
+
+> ⚠️ **当前实现状态**：`src/losses/losses.py` 中已实现 `PerceptualLoss`，但 `src/train/train_gan.py` 的训练目标是
+> `λ_mse · MSE + λ_adv · Adv`，**没有把感知损失计入**，`config.py` 中的 `lambda_percep` 目前是未生效的配置项。
+> 因此本项目当前实际训练的是「MSE + 对抗」两项损失。
 
 ### 4️⃣ 两阶段训练策略
 
@@ -105,21 +111,62 @@ $$
 
 ## 📊 实验结果
 
-在 DIV2K 验证集（约 1800 对图像块）上的客观指标对比：
+### 评估方式
 
-| 方法 | PSNR (dB) ↑ | SSIM ↑ |
+指标由仓库内的 `evaluate.py` 计算，**可复现**：
+
+```bash
+# 1. 先生成 test 划分（需要 DIV2K 原图）
+python -m src.data.preprocess --source-dir <DIV2K所在目录> --splits test
+
+# 2. 三方对比：双三次 / MSE 预训练 / GAN 微调
+python evaluate.py --split test
+```
+
+- **数据**：DIV2K 全部 900 张按原始图像 8:1:1 划分（`random_state=42`，同一原图的 patch 不跨 split），test 划分共 **11,634 对 256×256 patch**
+- **指标**：PSNR 与 SSIM，YCbCr 的 Y 通道另有单独一列；四周 shave 4px（标准 SR 评测做法）
+- **PSNR 两种口径都给出**：
+  - **口径 A「单张均值」**：先算每对图的 PSNR 再取平均 —— SR 论文最常用的报告方式
+  - **口径 B「池化」**：先对全测试集求平均 MSE 再换算 —— 对高误差样本更敏感
+  - 本项目两者相差约 5 dB。原因是误差在高误差 patch 上集中（前 5% 的高误差块贡献了约 22% 的总误差），属于预期现象。**引用数字时必须注明口径。**
+
+### 实测结果（DIV2K test 划分，11,634 对）
+
+| 方法 | PSNR (dB) 口径A ↑ | PSNR (dB) 口径B | SSIM ↑ | PSNR(Y) 口径A |
+|---|---:|---:|---:|---:|
+| 🔵 双三次插值（基线） | 28.581 | 23.533 | 0.7458 | 28.879 |
+| 🟢 **MSE 预训练生成器** | **29.311** | **24.627** | **0.7702** | **29.735** |
+| 🟠 GAN 对抗微调生成器 | 27.257 | 23.484 | 0.6981 | 28.065 |
+
+相对双三次基线的增益（口径 A）：
+
+| 方法 | ΔPSNR | ΔSSIM |
 |---|---:|---:|
-| 🔵 双三次插值 | 28.53 | 0.810 |
-| 🟠 基线 GAN 模型 | 29.01 | 0.845 |
-| 🟢 **本项目的改进模型** | **29.85** | **0.876** |
+| MSE 预训练生成器 | **+0.731 dB** | **+0.0244** |
+| GAN 对抗微调生成器 | −1.324 dB | −0.0477 |
 
-**主观效果对比**：
+### 如何看待这些数字
 
-| 方法 | 效果描述 |
-|---|---|
-| 🔵 双三次插值 | 图像整体平滑，边缘和纹理模糊，缺乏真实感 |
-| 🟠 基线 GAN | 边缘锐度有所提升，但存在不自然伪影 |
-| 🟢 **改进模型** | 纹理细节更丰富，边缘更清晰，复合损失有效帮助生成器学习真实图像分布 |
+1. **最优的是 MSE 预训练模型，而不是 GAN 微调后的模型。**
+   这与超分领域的普遍规律一致：对抗损失用保真度（PSNR/SSIM）换感知质量（纹理真实感）。
+   本项目 GAN 阶段 PSNR 下降 2.05 dB，说明对抗权重或训练轮数还有较大调优空间。
+
+2. **GAN 模型目前低于双三次基线。**
+   正常训练下，GAN 即使 PSNR 略低于 MSE 模型，也不应低于双三次插值。结合代码分析，可能原因有二：
+   - 感知损失**未接入**（见上文「复合损失函数」），缺少稳定高频细节的约束项，这是业内报告 PSNR 崩塌时的常见原因
+   - 对抗训练仅 20 epoch，判别器可能已过强
+   这两点都是后续可以验证的改进方向。
+
+3. **绝对数值低于部分论文报道，与评测协议有关。**
+   本项目在 256×256 patch 上评测（LR 由 HR 经双三次 4 倍下采样得到）。
+   分辨率越低的输入，4 倍放大的信息损失越严重，PSNR 天然偏低；
+   标准基准（Set5/Set14）通常对完整 2K 图像下采样后再评测。
+
+4. **主观效果**：SR 输出可见高频网格伪影（`results/` 下的对比图），
+   这与 GAN 的 PSNR 偏低互相印证——对抗训练在提升锐度的同时引入了结构性伪影。
+
+> 📌 上表数字由 `python evaluate.py --split test` 实测得到，原始结果见 `results/eval_test_*.json` / `.csv`。
+> 此前 README 曾列出 29.85 dB，但仓库中缺少产生该数字的评测代码，无法复现，故替换为本表实测值。
 
 ---
 
@@ -155,9 +202,16 @@ ISR-GAN-System/
 ├── 🎨 frontend/
 │   └── index.html                   # Web 演示页面
 │
+├── 📏 evaluate.py                   # 量化评估（PSNR/SSIM，多方对比）← 新增
+├── 🧪 tests/                        # 离线单元测试 ← 新增
+│   ├── test_metrics.py              #   指标实现正确性（与暴力实现交叉验证）
+│   └── test_model.py                #   生成器结构、判别器、推理链路、权重加载
+├── 🤖 .github/workflows/tests.yml   # CI：ruff + pytest ← 新增
+│
 ├── 💾 checkpoints/                  # 模型权重（.pth）
 ├── 📦 dataset/                      # 原始数据集（需自行下载）
 ├── ⚙️ processed/                    # 预处理产物
+├── 📈 results/                      # 评估结果与对比图
 └── 📝 logs/                         # 训练日志与损失曲线
 ```
 
@@ -165,7 +219,7 @@ ISR-GAN-System/
 
 ## ⚙️ 环境安装
 
-推荐使用 Python 3.9+ 和虚拟环境：
+推荐使用 Python 3.11 和虚拟环境：
 
 ```bash
 python -m venv .venv
@@ -179,22 +233,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**`requirements.txt`**：
+`requirements.txt` 已按实际验证过的版本**精确锁定**（`==`），避免依赖漂移。
+测试需要额外安装：`pip install pytest ruff`。
 
-```txt
-torch>=2.0
-torchvision
-Flask
-flask-cors
-opencv-python
-numpy
-Pillow
-scikit-learn
-matplotlib
-tqdm
+### 运行测试
+
+```bash
+python -m pytest tests/ -v          # 全部离线，不需要数据集；权重缺失时相关用例自动跳过
+ruff check . --select F,E9          # 代码风格检查
 ```
-
-> ⚠️ 代码使用 `torch.amp.GradScaler("cuda")` 和 `torch.amp.autocast("cuda")`，需 **`torch >= 2.0`**。
 
 ---
 
@@ -211,8 +258,19 @@ dataset/
 运行预处理脚本：
 
 ```bash
+# 默认读取 dataset/，生成全部 train/val/test 划分
 python -m src.data.preprocess
+
+# 原始图在其他位置时，用 --source-dir 指定，无需复制数据
+python -m src.data.preprocess --source-dir /path/to/DIV2K
+
+# 只生成某个划分（完整 train 划分的 patch 数量很大、体积上百 GB）
+python -m src.data.preprocess --splits test
 ```
+
+**划分规则**：DIV2K 的 train 与 valid 原图合并后按 **8:1:1** 随机划分，
+`random_state=42` 固定，**以原始图像为单位**（同一张原图切出的 patch 不会跨 split，杜绝数据泄露）。
+900 张原图 → train 720 / val 90 / test 90 张；其中 test 划分实测产出 **11,634 对** patch。
 
 预处理完成后，`processed/` 目录下会生成：
 
@@ -343,13 +401,14 @@ curl -X POST -F "image=@example.jpg" http://127.0.0.1:5000/superres_base64
 
 | 类别 | 技术 |
 |---|---|
-| 🐍 编程语言 | Python 3.9+ |
-| 🔥 深度学习框架 | PyTorch ≥ 2.0 |
+| 🐍 编程语言 | Python 3.11（已在 3.11.0 上验证） |
+| 🔥 深度学习框架 | PyTorch 2.14 |
 | 👁️ 计算机视觉 | OpenCV, NumPy |
-| 🌐 后端框架 | Flask |
+| 🌐 后端框架 | Flask 3.1 |
 | 🎨 前端 | 原生 HTML5 / CSS3 / JavaScript |
 | 📊 数据处理 | scikit-learn, Pillow |
 | 📈 可视化 | Matplotlib, tqdm |
+| ✅ 质量保障 | pytest（离线单测）+ GitHub Actions |
 
 ---
 
