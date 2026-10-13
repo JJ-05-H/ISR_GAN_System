@@ -6,7 +6,16 @@ DIV2K 数据预处理：
 3. 双三次下采样生成对应 LR patch
 4. 划分 train / val / test
 5. 生成 JSON 索引文件
+
+命令行：
+    python -m src.data.preprocess                      # 用 config 里的 dataset 目录
+    python -m src.data.preprocess --source-dir <目录>   # 指定原始 DIV2K 所在目录
+    python -m src.data.preprocess --splits test        # 只生成 test 划分
+
+注意：划分使用固定的 random_state=42 且按「原始图像」为单位切分，
+同一原始图的 patch 只会落在一个 split 里，不存在数据泄露。
 """
+import argparse
 import os
 import json
 import cv2
@@ -81,18 +90,31 @@ def create_index(split_name, hr_dir, lr_dir, out_path):
     print(f"[{split_name}] 生成 {len(pairs)} 对图像")
 
 
-def main():
+def main(source_dir=None, splits_to_build=None):
+    """执行预处理
+
+    参数：
+        source_dir: 原始 DIV2K 目录，需包含 DIV2K_train_HR / DIV2K_valid_HR。
+                    默认用 config 里的 dataset 目录。
+        splits_to_build: 只生成哪些划分（如 ["test"]）。None 表示全部。
+                         划分本身始终按 train/val/test 三份计算，
+                         只是可以选择只落盘其中一部分，避免生成上百 GB。
+    """
     cfg = Config()
+
+    raw_train_dir = os.path.join(source_dir, "DIV2K_train_HR") if source_dir else cfg.raw_train_dir
+    raw_valid_dir = os.path.join(source_dir, "DIV2K_valid_HR") if source_dir else cfg.raw_valid_dir
 
     # 1. 建目录
     splits = ["train", "val", "test"]
+    build = splits_to_build or splits
     for s in splits:
         os.makedirs(os.path.join(cfg.output_root, s, "HR"), exist_ok=True)
         os.makedirs(os.path.join(cfg.output_root, s, "LR"), exist_ok=True)
 
     # 2. 收集所有原始图
     all_imgs = []
-    for d in [cfg.raw_train_dir, cfg.raw_valid_dir]:
+    for d in [raw_train_dir, raw_valid_dir]:
         if not os.path.exists(d):
             print(f"[警告] 找不到目录: {d}")
             continue
@@ -118,9 +140,13 @@ def main():
     val_imgs, test_imgs = train_test_split(temp, train_size=n_val, random_state=42)
 
     split_map = {"train": train_imgs, "val": val_imgs, "test": test_imgs}
+    print(f"划分: train={len(train_imgs)} val={len(val_imgs)} test={len(test_imgs)} 张原始图")
+    print(f"本次生成: {', '.join(build)}")
 
     # 4. 裁剪
     for name, imgs in split_map.items():
+        if name not in build:
+            continue
         hr_dir = os.path.join(cfg.output_root, name, "HR")
         lr_dir = os.path.join(cfg.output_root, name, "LR")
         for p in tqdm(imgs, desc=f"裁剪 {name}"):
@@ -128,7 +154,7 @@ def main():
             sliding_window_crop(p, hr_dir, lr_dir, img_id)
 
     # 5. 生成索引
-    for name in splits:
+    for name in build:
         hr_dir = os.path.join(cfg.output_root, name, "HR")
         lr_dir = os.path.join(cfg.output_root, name, "LR")
         out = os.path.join(cfg.output_root, f"{name}_index.json")
@@ -137,5 +163,24 @@ def main():
     print("预处理完成。")
 
 
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="DIV2K 数据预处理")
+    parser.add_argument(
+        "--source-dir",
+        default=None,
+        help="原始 DIV2K 目录（需含 DIV2K_train_HR / DIV2K_valid_HR）；"
+             "默认使用 config.py 中的 dataset/",
+    )
+    parser.add_argument(
+        "--splits",
+        nargs="+",
+        choices=["train", "val", "test"],
+        default=None,
+        help="只生成指定划分（默认全部）。划分逻辑不受影响。",
+    )
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(source_dir=args.source_dir, splits_to_build=args.splits)

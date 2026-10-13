@@ -1,10 +1,23 @@
-torch>=2.0
-torchvision
-Flask
-flask-cors
-opencv-python
-numpy
-Pillow
-scikit-learn
-matplotlib
-tqdm
+# 运行时依赖（版本按当前 .venv 实际安装锁定）
+# 安装：pip install -r requirements.txt
+# 测试需要额外安装：pip install pytest
+
+# --- 深度学习 ---
+torch==2.14.0
+torchvision==0.29.0          # 感知损失需要 vgg19 预训练权重
+
+# --- 图像处理 ---
+opencv-python==5.0.0.93
+numpy==2.4.6
+Pillow==12.3.0
+
+# --- 数据划分与可视化 ---
+scikit-learn==1.9.1          # train_test_split（数据预处理划分）
+matplotlib==3.11.2           # 训练损失曲线
+
+# --- Web 服务 ---
+Flask==3.1.3
+flask-cors==6.0.5
+
+# --- 其他 ---
+tqdm==4.70.1
