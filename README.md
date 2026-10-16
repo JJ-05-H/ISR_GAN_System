@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🖼️ ISR-GAN-System
+# 🖼️ ISR_GAN_System
 
 **基于改进 SRGAN 的图像超分辨率重建系统**
 
