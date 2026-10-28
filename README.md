@@ -19,7 +19,7 @@
 ![Scale](https://img.shields.io/badge/Upscale-4%C3%97-f59e0b?style=flat-square)
 
 </div>
-
+Contributor: JJ-05-H (主要负责数据采集与清洗等部分)
 ---
 
 ## 📖 目录
